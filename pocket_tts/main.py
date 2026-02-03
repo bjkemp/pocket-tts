@@ -1,16 +1,26 @@
 import io
 import logging
 import os
+import sys
 import tempfile
 import threading
 from pathlib import Path
 from queue import Queue
 
+# Disable SSL verification for corporate firewalls
+# Add project root to path so we can import the patch
+sys.path.insert(0, str(Path(__file__).parent.parent))
+try:
+    import disable_ssl_verify  # noqa: F401
+except ImportError:
+    pass  # Patch file not present, continue without it
+
 import typer
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 from typing_extensions import Annotated
 
 from pocket_tts.data.audio import stream_audio_chunks
@@ -59,6 +69,14 @@ web_app.add_middleware(
 )
 
 
+class SpeechRequest(BaseModel):
+    model: str = "pocket-tts"
+    input: str
+    voice: str | None = None
+    response_format: str = "wav"
+    speed: float = 1.0
+
+
 @web_app.get("/")
 async def root():
     """Serve the frontend."""
@@ -69,6 +87,31 @@ async def root():
 @web_app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+@web_app.post("/v1/audio/speech")
+async def openai_speech(request: SpeechRequest):
+    """OpenAI-compatible TTS endpoint."""
+    if not request.input.strip():
+        raise HTTPException(status_code=400, detail="Input cannot be empty")
+
+    voice = request.voice
+    # If no voice specified in request, try to read from .current_voice
+    if not voice:
+        project_dir = Path(__file__).parent.parent
+        current_voice_path = project_dir / ".current_voice"
+        if current_voice_path.exists():
+            voice = current_voice_path.read_text().strip()
+
+    if voice in PREDEFINED_VOICES:
+        model_state = tts_model._cached_get_state_for_audio_prompt(voice)
+    else:
+        model_state = global_model_state
+
+    return StreamingResponse(
+        generate_data_with_state(request.input, model_state),
+        media_type="audio/wav",
+    )
 
 
 def write_to_queue(queue, text_to_generate, model_state):

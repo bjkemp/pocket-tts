@@ -1,0 +1,89 @@
+#!/bin/bash
+
+# pocket-say: A drop-in replacement for macOS 'say' using Pocket TTS
+# Usage: pocket-say [-v voice] [-o output.wav] "message"
+# Usage: echo "hello" | pocket-say
+
+PROJECT_DIR="/Users/kempb/Projects/pocket-tts"
+VOICE=""
+OUTPUT_FILE=""
+TEXT=""
+
+# Parse arguments to mimic 'say'
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--voice)
+            VOICE="$2"
+            shift 2
+            ;;
+        -o|--output-file)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        -*)
+            # Ignore other say flags for now
+            shift
+            ;;
+        *)
+            TEXT="$*"
+            break
+            ;;
+    esac
+done
+
+# If VOICE is not set via -v, check .current_voice config
+if [ -z "$VOICE" ]; then
+    if [ -f "$PROJECT_DIR/.current_voice" ]; then
+        VOICE=$(cat "$PROJECT_DIR/.current_voice")
+    else
+        VOICE="alba"
+    fi
+fi
+
+# Handle STDIN if TEXT is empty
+if [ -z "$TEXT" ]; then
+    if [ ! -t 0 ]; then
+        TEXT=$(cat)
+    fi
+fi
+
+if [ -z "$TEXT" ]; then
+    exit 0
+fi
+
+# Use a temporary file if we're playing audio
+PLAY_AUDIO=true
+if [ -n "$OUTPUT_FILE" ]; then
+    PLAY_AUDIO=false
+    TEMP_WAV="$OUTPUT_FILE"
+else
+    TEMP_WAV=$(mktemp /tmp/pocket_tts_XXXXXX)
+    mv "$TEMP_WAV" "${TEMP_WAV}.wav"
+    TEMP_WAV="${TEMP_WAV}.wav"
+fi
+
+# Ensure server is running or fallback to slow mode?
+# For now, we assume the user has the server running via the Menu Bar app or start_server.sh
+# Check health
+if ! curl -s "http://localhost:8000/health" > /dev/null; then
+    # Fallback: Start server automatically or use direct CLI?
+    # Direct CLI is slow because it loads the model every time.
+    # Let's try to start it if it's not running.
+    "$PROJECT_DIR/start_server.sh" > /dev/null 2>&1
+fi
+
+# Hit the local server
+curl -s -X POST "http://localhost:8000/tts" \
+     -H "Content-Type: application/x-www-form-urlencoded" \
+     --data-urlencode "text=$TEXT" \
+     --data-urlencode "voice_url=$VOICE" \
+     --output "$TEMP_WAV"
+
+if [ "$PLAY_AUDIO" = true ]; then
+    if [ -s "$TEMP_WAV" ]; then
+        afplay "$TEMP_WAV"
+    fi
+    rm "$TEMP_WAV"
+else
+    echo "Audio saved to $OUTPUT_FILE"
+fi

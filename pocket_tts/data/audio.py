@@ -107,8 +107,10 @@ class StreamingWAVWriter:
         self.wave_writer.writeframesraw(bytes(num_silence_samples * 2))
 
         if self.wave_writer:
-            # do not update the header for unseekable streams
-            self.wave_writer._patchheader = lambda: None
+            # Only suppress header patch for unseekable streams (e.g. HTTP responses).
+            # Seekable files (e.g. pocket-say -o) should get the correct frame count.
+            if not self.output_stream.seekable():
+                self.wave_writer._patchheader = lambda: None
             self.wave_writer.close()
 
 

@@ -82,7 +82,16 @@ profile_output*
 *.model
 *.pt
 
-# Agents files, use a symlink to AGENTS.md instead. 
+# Pocket TTS runtime state
+server.log
+.current_voice
+SETUP_SUMMARY.md
+
+# Local agent config
+.gemini/
+hooks.md
+
+# Agents files, use a symlink to AGENTS.md instead.
 CLAUDE.md
 QWEN.md
 .claude/
