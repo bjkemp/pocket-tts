@@ -1,0 +1,3 @@
+# Allow gemini files
+!.gemini/settings.json
+!.gemini/hooks/notify.js

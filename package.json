@@ -1,0 +1,14 @@
+{
+  "name": "pocket-tts-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Pocket TTS",
+  "type": "module",
+  "main": "mcp.js",
+  "scripts": {
+    "start": "node mcp.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  }
+}

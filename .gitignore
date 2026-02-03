@@ -91,6 +91,10 @@ SETUP_SUMMARY.md
 .gemini/
 hooks.md
 
+# Node.js / MCP
+node_modules/
+pnpm-lock.yaml
+
 # Agents files, use a symlink to AGENTS.md instead.
 CLAUDE.md
 QWEN.md
