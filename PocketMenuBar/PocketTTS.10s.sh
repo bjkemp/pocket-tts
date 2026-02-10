@@ -5,9 +5,15 @@
 # <bitbar.author>Gemini</bitbar.author>
 # <bitbar.desc>Controls Pocket TTS local server and voices</bitbar.desc>
 
-# Get the directory where this script is located
+# Get the directory where this script is located, resolving symlinks
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
 # Since this script is in PocketMenuBar/, PROJECT_DIR is the parent
-PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+PROJECT_DIR="$( cd -P "$( dirname "$SOURCE" )/.." && pwd )"
 cd "$PROJECT_DIR"
 
 # Check status

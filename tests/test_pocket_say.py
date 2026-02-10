@@ -38,6 +38,12 @@ while [[ $# -gt 0 ]]; do
             echo "RIFF....WAVE" > "$2"
             shift 2
             ;;
+        --data-urlencode)
+            if [[ "$2" == voice_url=* ]]; then
+                echo "VOICE: ${2#voice_url=}" >> "$TEST_LOG"
+            fi
+            shift 2
+            ;;
         *)
             shift
             ;;
@@ -156,3 +162,22 @@ def test_pocket_say_headphones_only_enabled_with_wired_headphones(test_env):
 
     log_content = test_env["test_log"].read_text()
     assert "PLAYING" in log_content
+
+
+def test_pocket_say_via_symlink(test_env):
+    """Test that pocket-say correctly identifies PROJECT_DIR when called via a symlink."""
+    # Create a .current_voice file in the real project dir
+    (test_env["tmp_path"] / ".current_voice").write_text("azelma")
+    
+    # Create a symlink in a different directory
+    other_bin = test_env["tmp_path"] / "other_bin"
+    other_bin.mkdir()
+    symlink_path = other_bin / "pocket-say-link"
+    os.symlink(test_env["pocket_say"], symlink_path)
+    
+    # Run via symlink
+    subprocess.run([str(symlink_path), "hello"], env=test_env["env"], check=True)
+    
+    log_content = test_env["test_log"].read_text()
+    # If symlink resolution fails, it will use the default 'alba' because it won't find .current_voice
+    assert "VOICE: azelma" in log_content
