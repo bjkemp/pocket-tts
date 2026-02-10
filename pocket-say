@@ -4,7 +4,8 @@
 # Usage: pocket-say [-v voice] [-o output.wav] "message"
 # Usage: echo "hello" | pocket-say
 
-PROJECT_DIR="/Users/kempb/Projects/pocket-tts"
+# Get the directory where this script is located
+PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 VOICE=""
 OUTPUT_FILE=""
 TEXT=""
@@ -19,6 +20,10 @@ while [[ $# -gt 0 ]]; do
         -o|--output-file)
             OUTPUT_FILE="$2"
             shift 2
+            ;;
+        --version)
+            echo "pocket-say version 1.0.0 (Pocket TTS)"
+            exit 0
             ;;
         -*)
             # Ignore other say flags for now
@@ -69,7 +74,7 @@ if ! curl -s "http://localhost:8000/health" > /dev/null; then
     # Fallback: Start server automatically or use direct CLI?
     # Direct CLI is slow because it loads the model every time.
     # Let's try to start it if it's not running.
-    "$PROJECT_DIR/start_server.sh" > /dev/null 2>&1
+    "$PROJECT_DIR/scripts/start_server.sh" > /dev/null 2>&1
 fi
 
 # Hit the local server
@@ -81,7 +86,28 @@ curl -s -X POST "http://localhost:8000/tts" \
 
 if [ "$PLAY_AUDIO" = true ]; then
     if [ -s "$TEMP_WAV" ]; then
-        afplay "$TEMP_WAV"
+        SHOULD_PLAY=true
+        if [ -f "$PROJECT_DIR/.headphones_only" ]; then
+            # Check if headphones are connected
+            OUTPUT_INFO=$(system_profiler SPAudioDataType | grep -B 10 "Default Output Device: Yes")
+            
+            # Default to not playing if Headphones Only is on
+            SHOULD_PLAY=false
+            
+            # Allow if it's explicitly Headphones or Bluetooth
+            if echo "$OUTPUT_INFO" | grep -Ei "Headphone|Bluetooth|AirPod|Buds|Headset" > /dev/null; then
+                SHOULD_PLAY=true
+            fi
+            
+            # If it's Built-in but not Headphones, it's definitely speakers
+            if echo "$OUTPUT_INFO" | grep -q "Transport: Built-in" && ! echo "$OUTPUT_INFO" | grep -Ei "Headphone" > /dev/null; then
+                SHOULD_PLAY=false
+            fi
+        fi
+
+        if [ "$SHOULD_PLAY" = true ]; then
+            afplay "$TEMP_WAV"
+        fi
     fi
     rm "$TEMP_WAV"
 else

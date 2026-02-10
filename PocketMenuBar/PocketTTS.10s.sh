@@ -5,7 +5,9 @@
 # <bitbar.author>Gemini</bitbar.author>
 # <bitbar.desc>Controls Pocket TTS local server and voices</bitbar.desc>
 
-PROJECT_DIR="/Users/kempb/Projects/pocket-tts"
+# Get the directory where this script is located
+# Since this script is in PocketMenuBar/, PROJECT_DIR is the parent
+PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
 cd "$PROJECT_DIR"
 
 # Check status
@@ -21,9 +23,15 @@ echo "---"
 
 if [ "$RUNNING" = true ]; then
     echo "Stop Service | bash=$PROJECT_DIR/PocketMenuBar/control.sh param1=stop terminal=false"
+    echo "Test Voice | bash=$PROJECT_DIR/PocketMenuBar/control.sh param1=test terminal=false"
 else
     echo "Start Service | bash=$PROJECT_DIR/PocketMenuBar/control.sh param1=start terminal=false"
+    echo "Test Voice | color=gray"
 fi
+
+HP_CHECK=""
+if [ -f ".headphones_only" ]; then HP_CHECK="✅ "; fi
+echo "$HP_CHECK""Headphones Only | bash=$PROJECT_DIR/PocketMenuBar/control.sh param1=headphones terminal=false"
 
 echo "---"
 echo "Active Voice"

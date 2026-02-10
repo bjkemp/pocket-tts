@@ -16,6 +16,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { spawn } from "child_process";
 import { z } from "zod";
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const PREDEFINED_VOICES = [
   "alba",
@@ -134,6 +139,67 @@ ${stdout}`,
           },
         ],
       };
+    },
+  },
+  {
+    name: "say",
+    description: "Generate and play speech audio from text immediately (macOS only).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: {
+          type: "string",
+          description: "The text to convert to speech and play.",
+        },
+        voice: {
+          type: "string",
+          description: `The voice to use. Can be a predefined voice (${PREDEFINED_VOICES.join(
+            ", "
+          )}) or a path to an audio file/safetensors embedding.`,
+        },
+      },
+      required: ["text"],
+    },
+    async handler(args) {
+      const { text, voice } = args;
+      const cmdArgs = [text];
+      if (voice) {
+        cmdArgs.unshift("-v", voice);
+      }
+
+      const pocketSayPath = join(__dirname, "pocket-say");
+
+      return new Promise((resolve) => {
+        const process = spawn(pocketSayPath, cmdArgs);
+        let stdout = "";
+        let stderr = "";
+
+        process.stdout.on("data", (data) => {
+          stdout += data.toString();
+        });
+
+        process.stderr.on("data", (data) => {
+          stderr += data.toString();
+        });
+
+        process.on("close", (code) => {
+          if (code !== 0) {
+            resolve({
+              isError: true,
+              content: [{ type: "text", text: `Error playing audio: ${stderr || stdout}` }],
+            });
+          } else {
+            resolve({
+              content: [
+                {
+                  type: "text",
+                  text: `Successfully played: "${text}"`,
+                },
+              ],
+            });
+          }
+        });
+      });
     },
   },
   {

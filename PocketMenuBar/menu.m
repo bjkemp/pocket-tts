@@ -5,6 +5,7 @@
 @property (strong) NSStatusItem *statusItem;
 @property (strong) NSTimer *timer;
 @property (assign) BOOL isRunning;
+@property (assign) BOOL headphonesOnly;
 @property (strong) NSString *projectPath;
 @property (strong) NSArray *voices;
 @property (strong) NSString *currentVoice;
@@ -15,10 +16,25 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _projectPath = @"/Users/kempb/Projects/pocket-tts";
+        // Try to find project path dynamically
+        NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+        // If we are running from build/PocketTTSBar.app, project root is 3 levels up
+        // PocketMenuBar/build/PocketTTSBar.app -> 1: build, 2: PocketMenuBar, 3: root
+        NSString *path = [bundlePath stringByDeletingLastPathComponent]; // build/
+        path = [path stringByDeletingLastPathComponent]; // PocketMenuBar/
+        path = [path stringByDeletingLastPathComponent]; // root
+        
+        // Verify if it looks like the project root (e.g. has pocket-say)
+        NSString *checkPath = [path stringByAppendingPathComponent:@"pocket-say"];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:checkPath]) {
+            // Fallback to hardcoded for now if dynamic fails, but try to be smart
+            path = @"/Users/kempb/Projects/pocket-tts";
+        }
+        
+        _projectPath = path;
         _voices = @[@"alba", @"marius", @"javert", @"jean", @"fantine", @"cosette", @"eponine", @"azelma"];
-        _currentVoice = @"alba";
-        [self loadCurrentVoice];
+        _currentVoice = @"azelma";
+        [self loadSettings];
     }
     return self;
 }
@@ -37,12 +53,31 @@
                                                  repeats:YES];
 }
 
-- (void)loadCurrentVoice {
-    NSString *path = [self.projectPath stringByAppendingPathComponent:@".current_voice"];
+- (void)loadSettings {
+    // Load Voice
+    NSString *voicePath = [self.projectPath stringByAppendingPathComponent:@".current_voice"];
     NSError *error;
-    NSString *voice = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
+    NSString *voice = [NSString stringWithContentsOfFile:voicePath encoding:NSUTF8StringEncoding error:&error];
     if (voice) {
         _currentVoice = [voice stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+
+    // Load Headphones Only setting
+    NSString *hpPath = [self.projectPath stringByAppendingPathComponent:@".headphones_only"];
+    _headphonesOnly = [[NSFileManager defaultManager] fileExistsAtPath:hpPath];
+}
+
+- (void)saveSettings {
+    // Save Voice
+    NSString *voicePath = [self.projectPath stringByAppendingPathComponent:@".current_voice"];
+    [self.currentVoice writeToFile:voicePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    // Save Headphones Only setting
+    NSString *hpPath = [self.projectPath stringByAppendingPathComponent:@".headphones_only"];
+    if (self.headphonesOnly) {
+        [@"1" writeToFile:hpPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [[NSFileManager defaultManager] removeItemAtPath:hpPath error:nil];
     }
 }
 
@@ -61,6 +96,18 @@
     } else {
         [menu addItemWithTitle:@"Start Service" action:@selector(startService) keyEquivalent:@"S"];
     }
+    
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *testItem = [[NSMenuItem alloc] initWithTitle:@"Test Voice" action:@selector(testVoice) keyEquivalent:@"t"];
+    [testItem setEnabled:self.isRunning];
+    [testItem setTarget:self];
+    [menu addItem:testItem];
+
+    NSMenuItem *hpItem = [[NSMenuItem alloc] initWithTitle:@"Headphones Only" action:@selector(toggleHeadphonesOnly:) keyEquivalent:@"h"];
+    [hpItem setState:self.headphonesOnly ? NSControlStateValueOn : NSControlStateValueOff];
+    [hpItem setTarget:self];
+    [menu addItem:hpItem];
     
     [menu addItem:[NSMenuItem separatorItem]];
     
@@ -84,6 +131,20 @@
     self.statusItem.menu = menu;
 }
 
+- (void)toggleHeadphonesOnly:(NSMenuItem *)sender {
+    self.headphonesOnly = !self.headphonesOnly;
+    [self saveSettings];
+    [self setupMenu];
+}
+
+- (void)testVoice {
+    NSString *cmd = [NSString stringWithFormat:@"cd %@ && ./PocketMenuBar/control.sh test", self.projectPath];
+    NSTask *task = [[NSTask alloc] init];
+    [task setLaunchPath:@"/bin/bash"];
+    [task setArguments:@[@"-c", cmd]];
+    [task launch];
+}
+
 - (void)updateIcon {
     self.statusItem.button.title = self.isRunning ? @"🎙️" : @"🚫";
 }
@@ -105,7 +166,7 @@
 }
 
 - (void)startService {
-    NSString *cmd = [NSString stringWithFormat:@"cd %@ && ./start_server.sh", self.projectPath];
+    NSString *cmd = [NSString stringWithFormat:@"cd %@ && ./scripts/start_server.sh", self.projectPath];
     NSTask *task = [[NSTask alloc] init];
     [task setLaunchPath:@"/bin/bash"];
     [task setArguments:@[@"-c", cmd]];
@@ -128,8 +189,7 @@
 
 - (void)selectVoice:(NSMenuItem *)sender {
     self.currentVoice = sender.title;
-    NSString *path = [self.projectPath stringByAppendingPathComponent:@".current_voice"];
-    [self.currentVoice writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [self saveSettings];
     [self setupMenu];
 }
 
