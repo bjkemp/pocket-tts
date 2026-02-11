@@ -84,6 +84,11 @@ profile_output*
 
 # Pocket TTS runtime state
 .current_voice
+.current_persona
+.headphones_only
+.muted
+.error
+*.log
 SETUP_SUMMARY.md
 
 # Local agent config
