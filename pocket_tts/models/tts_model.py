@@ -646,39 +646,7 @@ class TTSModel(nn.Module):
     def get_state_for_audio_prompt(
         self, audio_conditioning: Path | str | torch.Tensor, truncate: bool = False
     ) -> dict:
-        """Create model state conditioned on audio prompt for continuation.
-
-        This method processes an audio prompt and creates a model state that
-        captures the acoustic characteristics (speaker voice, style, prosody)
-        for use in subsequent text-to-speech generation. The resulting state
-        enables voice cloning and audio continuation with speaker consistency.
-
-        Args:
-            audio_conditioning: Audio prompt to condition (or .safetensors to load). Can be:
-                - Path: Local file path to audio file (or .safetensors)
-                - str: URL to download audio file (or .safetensors) from
-                - torch.Tensor: Pre-loaded audio tensor with shape [channels, samples]
-            truncate: Whether to truncate long audio prompts to 30 seconds.
-                Helps prevent memory issues with very long inputs. Defaults to False.
-
-        Returns:
-            dict: Model state dictionary containing hidden states and positional
-                information conditioned on the audio prompt. This state can be
-                passed to `generate_audio()` or `generate_audio_stream()` for
-                voice-consistent generation.
-
-        Raises:
-            FileNotFoundError: If audio file path doesn't exist.
-            ValueError: If audio tensor is invalid or empty.
-            RuntimeError: If audio processing or encoding fails.
-
-        Note:
-            - Audio is automatically resampled to the model's sample rate (24kHz)
-            - The audio is encoded using the Mimi compression model and projected
-              to the flow model's latent space
-            - Processing time is logged for performance monitoring
-            - The state preserves speaker characteristics for voice cloning
-        """
+        # ... (previous code)
         if isinstance(audio_conditioning, (str, Path)) and str(audio_conditioning).endswith(
             ".safetensors"
         ):
@@ -686,32 +654,87 @@ class TTSModel(nn.Module):
                 audio_conditioning = download_if_necessary(audio_conditioning)
             import safetensors.torch
 
-            prompt = safetensors.torch.load_file(audio_conditioning)["audio_prompt"]
+            weights = safetensors.torch.load_file(audio_conditioning)
+            if "audio_prompt" in weights:
+                prompt = weights["audio_prompt"]
+            elif "speaker_wavs" in weights:
+                prompt = weights["speaker_wavs"]
+                # speaker_wavs are [1, 512, length] latents
+                if prompt.shape[1] == 512:
+                    with display_execution_time("Projecting speaker_wavs from safetensors"):
+                        # Transpose to [1, length, 512] for linear projection to 1024
+                        latents = prompt.transpose(1, 2).to(self.device).to(torch.float32)
+                        prompt = F.linear(latents, self.flow_lm.speaker_proj_weight)
+                else:
+                    with display_execution_time("Encoding audio prompt from safetensors"):
+                        prompt = self._encode_audio(prompt.to(self.device))
+            else:
+                raise KeyError(f"Neither 'audio_prompt' nor 'speaker_wavs' found in {audio_conditioning}. Keys found: {list(weights.keys())}")
+
+
+
         elif isinstance(audio_conditioning, str) and audio_conditioning in PREDEFINED_VOICES:
             # We get the audio conditioning directly from the safetensors file.
             prompt = load_predefined_voice(audio_conditioning)
         else:
+            # Check for local voice file
+            if isinstance(audio_conditioning, str) and not Path(audio_conditioning).exists():
+                voices_dir_str = os.environ.get("POCKET_TTS_VOICES_DIR")
+                if voices_dir_str:
+                    voices_dir = Path(voices_dir_str)
+                else:
+                    # Default to tts-voices at the project root
+                    voices_dir = Path.cwd() / "tts-voices"
+
+                # Check for .wav or .safetensors
+                local_voice_path_wav = voices_dir / f"{audio_conditioning}.wav"
+                local_voice_path_sf = voices_dir / f"{audio_conditioning}.safetensors"
+
+                if local_voice_path_wav.exists():
+                    audio_conditioning = local_voice_path_wav
+                    logger.info(f"Found local voice: {audio_conditioning}")
+                elif local_voice_path_sf.exists():
+                    audio_conditioning = local_voice_path_sf
+                    logger.info(f"Found local voice: {audio_conditioning}")
+
             if not self.has_voice_cloning and isinstance(audio_conditioning, (str, Path)):
                 raise ValueError(VOICE_CLONING_UNSUPPORTED)
 
             if isinstance(audio_conditioning, str):
                 audio_conditioning = download_if_necessary(audio_conditioning)
+            
+            if isinstance(audio_conditioning, Path) and audio_conditioning.suffix == ".safetensors":
+                weights = safetensors.torch.load_file(audio_conditioning)
+                if "audio_prompt" in weights:
+                    prompt = weights["audio_prompt"]
+                elif "speaker_wavs" in weights:
+                    prompt = weights["speaker_wavs"]
+                    # speaker_wavs are [1, 512, length] latents
+                    if prompt.shape[1] == 512:
+                        with display_execution_time("Projecting speaker_wavs from safetensors"):
+                            latents = prompt.transpose(1, 2).to(self.device).to(torch.float32)
+                            prompt = F.linear(latents, self.flow_lm.speaker_proj_weight)
+                    else:
+                        with display_execution_time("Encoding audio prompt from safetensors"):
+                            prompt = self._encode_audio(prompt.to(self.device))
+                else:
+                    raise KeyError(f"Neither 'audio_prompt' nor 'speaker_wavs' found in {audio_conditioning}. Keys found: {list(weights.keys())}")
+            else:
+                if isinstance(audio_conditioning, Path):
+                    audio, conditioning_sample_rate = audio_read(audio_conditioning)
 
-            if isinstance(audio_conditioning, Path):
-                audio, conditioning_sample_rate = audio_read(audio_conditioning)
+                    if truncate:
+                        max_samples = int(30 * conditioning_sample_rate)  # 30 seconds of audio
+                        if audio.shape[-1] > max_samples:
+                            audio = audio[..., :max_samples]
+                            logger.info(f"Audio truncated to first 30 seconds ({max_samples} samples)")
 
-                if truncate:
-                    max_samples = int(30 * conditioning_sample_rate)  # 30 seconds of audio
-                    if audio.shape[-1] > max_samples:
-                        audio = audio[..., :max_samples]
-                        logger.info(f"Audio truncated to first 30 seconds ({max_samples} samples)")
+                    audio_conditioning = convert_audio(
+                        audio, conditioning_sample_rate, self.config.mimi.sample_rate, 1
+                    )
 
-                audio_conditioning = convert_audio(
-                    audio, conditioning_sample_rate, self.config.mimi.sample_rate, 1
-                )
-
-            with display_execution_time("Encoding audio prompt"):
-                prompt = self._encode_audio(audio_conditioning.unsqueeze(0).to(self.device))
+                with display_execution_time("Encoding audio prompt"):
+                    prompt = self._encode_audio(audio_conditioning.unsqueeze(0).to(self.device))
 
         model_state = init_states(self.flow_lm, batch_size=1, sequence_length=1000)
 

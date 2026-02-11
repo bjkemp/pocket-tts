@@ -6,9 +6,13 @@
 @property (strong) NSTimer *timer;
 @property (assign) BOOL isRunning;
 @property (assign) BOOL headphonesOnly;
+@property (assign) BOOL isMuted;
+@property (assign) BOOL isError; // New property to track errors
 @property (strong) NSString *projectPath;
 @property (strong) NSArray *voices;
 @property (strong) NSString *currentVoice;
+@property (strong) NSArray *personas;
+@property (strong) NSString *currentPersona;
 @end
 
 @implementation PocketTTSManager
@@ -32,17 +36,75 @@
         }
         
         _projectPath = path;
-        _voices = @[@"alba", @"marius", @"javert", @"jean", @"fantine", @"cosette", @"eponine", @"azelma"];
         _currentVoice = @"azelma";
+        _currentPersona = @"narrator";
+        
+        [self loadDynamicVoices];
+        [self loadDynamicPersonas];
         [self loadSettings];
+        [self checkError]; // Check for error status on startup
     }
     return self;
 }
 
+- (void)loadDynamicVoices {
+    NSString *scriptPath = [self.projectPath stringByAppendingPathComponent:@"scripts/list_all_voices.sh"];
+    NSTask *task = [[NSTask alloc] init];
+    [task setLaunchPath:@"/bin/bash"];
+    [task setArguments:@[scriptPath]];
+    
+    NSPipe *pipe = [NSPipe pipe];
+    [task setStandardOutput:pipe];
+    
+    NSError *error = nil;
+    if (@available(macOS 10.13, *)) {
+        [task launchAndReturnError:&error];
+    } else {
+        [task launch];
+    }
+    
+    NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
+    [task waitUntilExit];
+    
+    NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSArray *lines = [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    
+    NSMutableArray *validVoices = [NSMutableArray array];
+    for (NSString *line in lines) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length > 0) {
+            [validVoices addObject:trimmed];
+        }
+    }
+    self.voices = [validVoices sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+}
+
+- (void)loadDynamicPersonas {
+    NSString *personasPath = [self.projectPath stringByAppendingPathComponent:@"personas"];
+    NSError *error = nil;
+    NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:personasPath error:&error];
+    
+    NSMutableArray *validPersonas = [NSMutableArray array];
+    for (NSString *file in files) {
+        if ([file hasSuffix:@".md"]) {
+            [validPersonas addObject:[file stringByDeletingPathExtension]];
+        }
+    }
+    self.personas = [validPersonas sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+}
+
+- (void)refreshLists {
+    [self loadDynamicVoices];
+    [self loadDynamicPersonas];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self setupMenu];
+        [self updateIcon];
+    });
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
-    [self updateIcon];
-    [self setupMenu];
+    [self refreshLists];
     [self checkStatus];
     
     // Poll status every 5 seconds
@@ -53,6 +115,7 @@
                                                  repeats:YES];
 }
 
+
 - (void)loadSettings {
     // Load Voice
     NSString *voicePath = [self.projectPath stringByAppendingPathComponent:@".current_voice"];
@@ -62,15 +125,30 @@
         _currentVoice = [voice stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     }
 
+    // Load Persona
+    NSString *personaPath = [self.projectPath stringByAppendingPathComponent:@".current_persona"];
+    NSString *persona = [NSString stringWithContentsOfFile:personaPath encoding:NSUTF8StringEncoding error:&error];
+    if (persona) {
+        _currentPersona = [persona stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+
     // Load Headphones Only setting
     NSString *hpPath = [self.projectPath stringByAppendingPathComponent:@".headphones_only"];
     _headphonesOnly = [[NSFileManager defaultManager] fileExistsAtPath:hpPath];
+
+    // Load Mute setting
+    NSString *mutePath = [self.projectPath stringByAppendingPathComponent:@".muted"];
+    _isMuted = [[NSFileManager defaultManager] fileExistsAtPath:mutePath];
 }
 
 - (void)saveSettings {
     // Save Voice
     NSString *voicePath = [self.projectPath stringByAppendingPathComponent:@".current_voice"];
     [self.currentVoice writeToFile:voicePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    // Save Persona
+    NSString *personaPath = [self.projectPath stringByAppendingPathComponent:@".current_persona"];
+    [self.currentPersona writeToFile:personaPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
     // Save Headphones Only setting
     NSString *hpPath = [self.projectPath stringByAppendingPathComponent:@".headphones_only"];
@@ -79,9 +157,31 @@
     } else {
         [[NSFileManager defaultManager] removeItemAtPath:hpPath error:nil];
     }
+
+    // Save Mute setting
+    NSString *mutePath = [self.projectPath stringByAppendingPathComponent:@".muted"];
+    if (self.isMuted) {
+        [@"1" writeToFile:mutePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [[NSFileManager defaultManager] removeItemAtPath:mutePath error:nil];
+    }
+}
+
+- (void)checkError {
+    NSString *errorPath = [self.projectPath stringByAppendingPathComponent:@".error"];
+    self.isError = [[NSFileManager defaultManager] fileExistsAtPath:errorPath];
+}
+
+- (void)clearError {
+    NSString *errorPath = [self.projectPath stringByAppendingPathComponent:@".error"];
+    [[NSFileManager defaultManager] removeItemAtPath:errorPath error:nil];
+    [self checkError];
+    [self setupMenu];
+    [self updateIcon];
 }
 
 - (void)setupMenu {
+    [self checkError]; // Ensure we have latest state
     NSMenu *menu = [[NSMenu alloc] init];
     
     NSString *statusTitle = self.isRunning ? @"Status: Running" : @"Status: Stopped";
@@ -100,14 +200,29 @@
     [menu addItem:[NSMenuItem separatorItem]];
 
     NSMenuItem *testItem = [[NSMenuItem alloc] initWithTitle:@"Test Voice" action:@selector(testVoice) keyEquivalent:@"t"];
-    [testItem setEnabled:self.isRunning];
+    [testItem setEnabled:self.isRunning && !self.isError]; // Disable if there's an error
     [testItem setTarget:self];
     [menu addItem:testItem];
+
+    if (self.isError) {
+        NSMenuItem *clearErrorItem = [[NSMenuItem alloc] initWithTitle:@"Clear Error" action:@selector(clearError) keyEquivalent:@""];
+        [clearErrorItem setTarget:self];
+        [menu addItem:clearErrorItem];
+    }
+
+    NSMenuItem *muteItem = [[NSMenuItem alloc] initWithTitle:@"Mute" action:@selector(toggleMute:) keyEquivalent:@"m"];
+    [muteItem setState:self.isMuted ? NSControlStateValueOn : NSControlStateValueOff];
+    [muteItem setTarget:self];
+    [menu addItem:muteItem];
 
     NSMenuItem *hpItem = [[NSMenuItem alloc] initWithTitle:@"Headphones Only" action:@selector(toggleHeadphonesOnly:) keyEquivalent:@"h"];
     [hpItem setState:self.headphonesOnly ? NSControlStateValueOn : NSControlStateValueOff];
     [hpItem setTarget:self];
     [menu addItem:hpItem];
+
+    NSMenuItem *refreshItem = [[NSMenuItem alloc] initWithTitle:@"Refresh Lists" action:@selector(refreshLists) keyEquivalent:@"r"];
+    [refreshItem setTarget:self];
+    [menu addItem:refreshItem];
     
     [menu addItem:[NSMenuItem separatorItem]];
     
@@ -121,9 +236,23 @@
         [voiceMenu addItem:item];
     }
     
-    NSMenuItem *voiceSubmenu = [[NSMenuItem alloc] initWithTitle:@"Active Voice" action:nil keyEquivalent:@""];
+    NSMenuItem *voiceSubmenu = [[NSMenuItem alloc] initWithTitle:@"Default Voice" action:nil keyEquivalent:@""];
     [voiceSubmenu setSubmenu:voiceMenu];
     [menu addItem:voiceSubmenu];
+
+    NSMenu *personaMenu = [[NSMenu alloc] init];
+    for (NSString *persona in self.personas) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:persona action:@selector(selectPersona:) keyEquivalent:@""];
+        [item setTarget:self];
+        if ([persona isEqualToString:self.currentPersona]) {
+            [item setState:NSControlStateValueOn];
+        }
+        [personaMenu addItem:item];
+    }
+    
+    NSMenuItem *personaSubmenu = [[NSMenuItem alloc] initWithTitle:@"Default Persona" action:nil keyEquivalent:@""];
+    [personaSubmenu setSubmenu:personaMenu];
+    [menu addItem:personaSubmenu];
     
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Quit" action:@selector(terminate:) keyEquivalent:@"q"];
@@ -137,6 +266,12 @@
     [self setupMenu];
 }
 
+- (void)toggleMute:(NSMenuItem *)sender {
+    self.isMuted = !self.isMuted;
+    [self saveSettings];
+    [self setupMenu];
+}
+
 - (void)testVoice {
     NSString *cmd = [NSString stringWithFormat:@"cd %@ && ./PocketMenuBar/control.sh test", self.projectPath];
     NSTask *task = [[NSTask alloc] init];
@@ -146,7 +281,11 @@
 }
 
 - (void)updateIcon {
-    self.statusItem.button.title = self.isRunning ? @"🎙️" : @"🚫";
+    if (self.isError) {
+        self.statusItem.button.title = @"⚠️"; // Error icon
+    } else {
+        self.statusItem.button.title = self.isRunning ? @"🎙️" : @"🚫";
+    }
 }
 
 - (void)checkStatus {
@@ -161,6 +300,7 @@
                 [self updateIcon];
             });
         }
+        [self checkError]; // Also check for error status periodically
     }];
     [task resume];
 }
@@ -193,6 +333,12 @@
     [self setupMenu];
 }
 
+- (void)selectPersona:(NSMenuItem *)sender {
+    self.currentPersona = sender.title;
+    [self saveSettings];
+    [self setupMenu];
+}
+
 - (void)terminate:(id)sender {
     [NSApp terminate:sender];
 }
@@ -209,3 +355,4 @@ int main(int argc, const char * argv[]) {
     }
     return 0;
 }
+

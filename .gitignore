@@ -83,7 +83,6 @@ profile_output*
 *.pt
 
 # Pocket TTS runtime state
-server.log
 .current_voice
 SETUP_SUMMARY.md
 
@@ -99,3 +98,6 @@ pnpm-lock.yaml
 CLAUDE.md
 QWEN.md
 .claude/
+
+# Cloned voice repository
+tts-voices/

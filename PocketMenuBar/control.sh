@@ -23,6 +23,11 @@ case $COMMAND in
         ;;
     voice)
         echo "$VALUE" > .current_voice
+        rm -f .current_persona
+        ;;
+    persona)
+        echo "$VALUE" > .current_persona
+        rm -f .current_voice
         ;;
     headphones)
         if [ -f .headphones_only ]; then
@@ -31,7 +36,19 @@ case $COMMAND in
             echo "1" > .headphones_only
         fi
         ;;
+    mute)
+        if [ -f .muted ]; then
+            rm .muted
+        else
+            echo "1" > .muted
+        fi
+        ;;
     test)
         ./pocket-say "Pocket TTS, it really whips the llama's ass!"
+        if [ $? -ne 0 ]; then
+            echo "1" > .error
+        else
+            rm -f .error
+        fi
         ;;
 esac

@@ -8,12 +8,18 @@ from pathlib import Path
 from queue import Queue
 
 # Disable SSL verification for corporate firewalls
-# Add project root to path so we can import the patch
-sys.path.insert(0, str(Path(__file__).parent.parent))
-try:
-    import disable_ssl_verify  # noqa: F401
-except ImportError:
-    pass  # Patch file not present, continue without it
+# Add project root's 'tools' directory to path to import the patch
+project_root = Path(__file__).parent.parent
+tools_dir = project_root / "tools"
+if tools_dir.is_dir():
+    sys.path.insert(0, str(tools_dir))
+    try:
+        import disable_ssl_verify  # noqa: F401
+    except (ImportError, ModuleNotFoundError):
+        # clean up path if import fails
+        if sys.path[0] == str(tools_dir):
+            sys.path.pop(0)
+        pass  # Patch file not present, continue without it
 
 import typer
 import uvicorn
@@ -22,6 +28,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing_extensions import Annotated
+
+from pocket_tts.personas import load_persona, list_personas
 
 from pocket_tts.data.audio import stream_audio_chunks
 from pocket_tts.default_parameters import (
@@ -73,6 +81,7 @@ class SpeechRequest(BaseModel):
     model: str = "pocket-tts"
     input: str
     voice: str | None = None
+    persona: str | None = None
     response_format: str = "wav"
     speed: float = 1.0
 
@@ -95,18 +104,28 @@ async def openai_speech(request: SpeechRequest):
     if not request.input.strip():
         raise HTTPException(status_code=400, detail="Input cannot be empty")
 
-    voice = request.voice
-    # If no voice specified in request, try to read from .current_voice
-    if not voice:
+    persona_data = {}
+    if request.persona:
+        try:
+            persona_data = load_persona(request.persona)
+        except FileNotFoundError:
+            raise HTTPException(status_code=400, detail=f"Persona '{request.persona}' not found.")
+
+    final_voice = request.voice if request.voice is not None else persona_data.get("voice")
+
+    if not final_voice:
         project_dir = Path(__file__).parent.parent
         current_voice_path = project_dir / ".current_voice"
         if current_voice_path.exists():
-            voice = current_voice_path.read_text().strip()
+            final_voice = current_voice_path.read_text().strip()
+        else:
+            final_voice = DEFAULT_AUDIO_PROMPT
+    
+    # Use azelma as a fallback default if no voice is found
+    if not final_voice:
+        final_voice = "azelma"
 
-    if voice in PREDEFINED_VOICES:
-        model_state = tts_model._cached_get_state_for_audio_prompt(voice)
-    else:
-        model_state = global_model_state
+    model_state = tts_model._cached_get_state_for_audio_prompt(final_voice)
 
     return StreamingResponse(
         generate_data_with_state(request.input, model_state),
@@ -160,6 +179,7 @@ def text_to_speech(
     text: str = Form(...),
     voice_url: str | None = Form(None),
     voice_wav: UploadFile | None = File(None),
+    persona: str | None = Form(None),
 ):
     """
     Generate speech from text using the pre-loaded voice prompt or a custom voice.
@@ -168,6 +188,7 @@ def text_to_speech(
         text: Text to convert to speech
         voice_url: Optional voice URL (http://, https://, or hf://)
         voice_wav: Optional uploaded voice file (mutually exclusive with voice_url)
+        persona: Optional persona name
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
@@ -175,19 +196,81 @@ def text_to_speech(
     if voice_url is not None and voice_wav is not None:
         raise HTTPException(status_code=400, detail="Cannot provide both voice_url and voice_wav")
 
+    persona_data = {}
+    if persona:
+        try:
+            persona_data = load_persona(persona)
+        except FileNotFoundError:
+            raise HTTPException(status_code=400, detail=f"Persona '{persona}' not found.")
+
+    final_voice_url = voice_url if voice_url is not None else persona_data.get("voice")
+
     # Use the appropriate model state
-    if voice_url is not None:
-        if not (
-            voice_url.startswith("http://")
-            or voice_url.startswith("https://")
-            or voice_url.startswith("hf://")
-            or voice_url in PREDEFINED_VOICES
-        ):
+    if final_voice_url is not None:
+        # If the voice is a simple name (no path separators), search for it in the tts-voices directory
+        if "/" not in final_voice_url and "\\" not in final_voice_url:
+            voices_dir = Path(__file__).parent.parent / "tts-voices"
+            found_voice = None
+            
+            # 1. Search for .safetensors first (most efficient and reliable)
+            for f in voices_dir.glob(f"**/{final_voice_url}*.safetensors"):
+                if f.is_file() and f.stat().st_size > 1000: # Skip LFS pointers
+                    found_voice = f
+                    break
+            
+            # 2. Fallback to audio files only if no safetensors found
+            if not found_voice:
+                for ext in ["wav", "mp3", "flac", "ogg", "aiff"]:
+                    for f in voices_dir.glob(f"**/{final_voice_url}.{ext}"):
+                        if f.is_file() and f.stat().st_size > 1000:
+                            found_voice = f
+                            break
+                    if found_voice:
+                        break
+            
+            if found_voice:
+                final_voice_url = str(found_voice)
+                logging.info(f"Found voice file '{final_voice_url}'")
+
+        voice_path = Path(final_voice_url)
+        if voice_path.is_dir():
+            logging.info(f"'{final_voice_url}' is a directory, searching for voice file.")
+            # If a directory is provided, find the first suitable file
+            found_voice = None
+            # Try audio files first
+            for ext in ["wav", "mp3", "flac", "ogg", "aiff"]:
+                files = sorted([f for f in voice_path.glob(f"*.{ext}") if f.stat().st_size > 1000])
+                if files:
+                    found_voice = files[0]
+                    break
+            
+            # Then safetensors
+            if not found_voice:
+                files = sorted([f for f in voice_path.glob("*.safetensors") if f.stat().st_size > 1000])
+                if files:
+                    found_voice = files[0]
+            
+            if found_voice:
+                final_voice_url = str(found_voice)
+                logging.info(f"Found voice file '{final_voice_url}'")
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No supported voice file found in directory '{final_voice_url}' (found files may be Git LFS pointers)"
+                )
+
+        is_url = final_voice_url.startswith(("http://", "https://", "hf://"))
+        is_predefined = final_voice_url in PREDEFINED_VOICES
+        # Path.is_file() handles the check for existence.
+        is_file = Path(final_voice_url).is_file()
+
+        if not (is_url or is_predefined or is_file):
             raise HTTPException(
-                status_code=400, detail="voice_url must start with http://, https://, or hf://"
+                status_code=400,
+                detail=f"Voice '{final_voice_url}' not found. It must be a valid URL, a predefined voice name, a local file path, or a directory containing a voice file."
             )
-        model_state = tts_model._cached_get_state_for_audio_prompt(voice_url)
-        logging.warning("Using voice from URL: %s", voice_url)
+        model_state = tts_model._cached_get_state_for_audio_prompt(final_voice_url)
+        logging.warning("Using voice: %s", final_voice_url)
     elif voice_wav is not None:
         # Use uploaded voice file - preserve extension for format detection
         suffix = Path(voice_wav.filename).suffix if voice_wav.filename else ".wav"
@@ -243,10 +326,26 @@ def serve(
     uvicorn.run("pocket_tts.main:web_app", host=host, port=port, reload=reload)
 
 
+@cli_app.command(name="list-personas")
+def list_personas_command():
+    """List all available personas."""
+    personas = list_personas()
+    if not personas:
+        print("No personas found.")
+        return
+    print("Available personas:")
+    for persona in personas:
+        print(f"- {persona}")
+
+
+
 # ------------------------------------------------------
 # The pocket-tts single generation CLI implementation
 # ------------------------------------------------------
 
+# ... (rest of the imports)
+
+# ... (code before generate function)
 
 @cli_app.command()
 def generate(
@@ -255,22 +354,28 @@ def generate(
     ] = "Hello world. I am Kyutai's Pocket TTS. I'm fast enough to run on small CPUs. I hope you'll like me.",
     voice: Annotated[
         str, typer.Option(help="Path to audio conditioning file (voice to clone)")
-    ] = DEFAULT_AUDIO_PROMPT,
+    ] = None,
+    persona: Annotated[
+        str, typer.Option(help="Name of the persona to use")
+    ] = None,
     quiet: Annotated[bool, typer.Option("-q", "--quiet", help="Disable logging output")] = False,
     config: Annotated[
         str, typer.Option(help="Model signature or path to config .yaml file")
     ] = DEFAULT_VARIANT,
     lsd_decode_steps: Annotated[
         int, typer.Option(help="Number of generation steps")
-    ] = DEFAULT_LSD_DECODE_STEPS,
+    ] = None,
     temperature: Annotated[
         float, typer.Option(help="Temperature for generation")
-    ] = DEFAULT_TEMPERATURE,
-    noise_clamp: Annotated[float, typer.Option(help="Noise clamp value")] = DEFAULT_NOISE_CLAMP,
-    eos_threshold: Annotated[float, typer.Option(help="EOS threshold")] = DEFAULT_EOS_THRESHOLD,
+    ] = None,
+    speed: Annotated[
+        float, typer.Option(help="Playback speed of the generated audio.")
+    ] = None,
+    noise_clamp: Annotated[float, typer.Option(help="Noise clamp value")] = None,
+    eos_threshold: Annotated[float, typer.Option(help="EOS threshold")] = None,
     frames_after_eos: Annotated[
         int, typer.Option(help="Number of frames to generate after EOS")
-    ] = DEFAULT_FRAMES_AFTER_EOS,
+    ] = None,
     output_path: Annotated[
         str, typer.Option(help="Output path for generated audio")
     ] = "./tts_output.wav",
@@ -280,6 +385,24 @@ def generate(
     ] = MAX_TOKEN_PER_CHUNK,
 ):
     """Generate speech using Kyutai Pocket TTS."""
+    # Load persona data if specified
+    persona_data = {}
+    if persona:
+        try:
+            persona_data = load_persona(persona)
+        except FileNotFoundError as e:
+            logger.error(e)
+            raise typer.Exit(code=1)
+
+    # Determine final parameters with precedence: CLI > persona > default
+    final_voice = voice if voice is not None else persona_data.get("voice", DEFAULT_AUDIO_PROMPT)
+    final_lsd_decode_steps = lsd_decode_steps if lsd_decode_steps is not None else persona_data.get("lsd_decode_steps", DEFAULT_LSD_DECODE_STEPS)
+    final_temperature = temperature if temperature is not None else persona_data.get("temperature", DEFAULT_TEMPERATURE)
+    final_speed = speed if speed is not None else persona_data.get("speed", 1.0)
+    final_noise_clamp = noise_clamp if noise_clamp is not None else persona_data.get("noise_clamp", DEFAULT_NOISE_CLAMP)
+    final_eos_threshold = eos_threshold if eos_threshold is not None else persona_data.get("eos_threshold", DEFAULT_EOS_THRESHOLD)
+    final_frames_after_eos = frames_after_eos if frames_after_eos is not None else persona_data.get("frames_after_eos", DEFAULT_FRAMES_AFTER_EOS)
+
     if "cuda" in device:
         # Cuda graphs capturing does not play nice with multithreading.
         os.environ["NO_CUDA_GRAPH"] = "1"
@@ -287,20 +410,20 @@ def generate(
     log_level = logging.ERROR if quiet else logging.INFO
     with enable_logging("pocket_tts", log_level):
         tts_model = TTSModel.load_model(
-            config, temperature, lsd_decode_steps, noise_clamp, eos_threshold
+            config, final_temperature, final_lsd_decode_steps, final_noise_clamp, final_eos_threshold
         )
         tts_model.to(device)
 
-        model_state_for_voice = tts_model.get_state_for_audio_prompt(voice)
+        model_state_for_voice = tts_model.get_state_for_audio_prompt(final_voice)
         # Stream audio generation directly to file or stdout
         audio_chunks = tts_model.generate_audio_stream(
             model_state=model_state_for_voice,
             text_to_generate=text,
-            frames_after_eos=frames_after_eos,
+            frames_after_eos=final_frames_after_eos,
             max_tokens=max_tokens,
         )
 
-        stream_audio_chunks(output_path, audio_chunks, tts_model.config.mimi.sample_rate)
+        stream_audio_chunks(output_path, audio_chunks, tts_model.config.mimi.sample_rate, speed=final_speed)
 
         # Only print the result message if not writing to stdout
         if output_path != "-":

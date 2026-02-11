@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import soundfile as sf
 import torch
+import torchaudio
 from beartype.typing import Iterator
 
 logger = logging.getLogger(__name__)
@@ -21,35 +23,19 @@ FIRST_CHUNK_LENGTH_SECONDS = float(os.environ.get("FIRST_CHUNK_LENGTH_SECONDS", 
 
 
 def audio_read(filepath: str | Path) -> tuple[torch.Tensor, int]:
-    """Read audio file. WAV uses built-in wave module; other formats require soundfile."""
-    filepath = Path(filepath)
-
-    if filepath.suffix.lower() == ".wav":
-        # Use built-in wave module for WAV files
-        with wave.open(str(filepath), "rb") as wav_file:
-            sample_rate = wav_file.getframerate()
-            n_channels = wav_file.getnchannels()
-            raw_data = wav_file.readframes(-1)
-            samples = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
-            if n_channels > 1:
-                samples = samples.reshape(-1, n_channels).mean(axis=1)
-            return torch.from_numpy(samples).unsqueeze(0), sample_rate
-
-    # For non-WAV formats, use soundfile (optional dependency)
+    """Read audio file using soundfile for maximum compatibility."""
+    filepath_str = str(filepath)
     try:
-        import soundfile as sf
-    except ImportError as e:
-        raise ImportError(
-            "soundfile is required to read non-WAV audio files. "
-            "Install with: `pip install soundfile` or `uvx --with soundfile`"
-        ) from e
+        data, sample_rate = sf.read(filepath_str, dtype="float32")
+        if data.ndim == 1:
+            wav = torch.from_numpy(data).unsqueeze(0)
+        else:
+            wav = torch.from_numpy(data.mean(axis=1)).unsqueeze(0)
+        return wav, sample_rate
+    except Exception as e:
+        logger.error(f"Failed to read audio file {filepath_str}: {e}")
+        raise RuntimeError(f"Could not read audio file {filepath_str}. If it is a Git LFS pointer, ensure you have run 'git lfs pull'. Error: {e}")
 
-    data, sample_rate = sf.read(str(filepath), dtype="float32")
-    if data.ndim == 1:
-        wav = torch.from_numpy(data).unsqueeze(0)
-    else:
-        wav = torch.from_numpy(data.mean(axis=1)).unsqueeze(0)
-    return wav, sample_rate
 
 
 class StreamingWAVWriter:
@@ -120,7 +106,7 @@ def is_file_like(obj):
 
 
 def stream_audio_chunks(
-    path: str | Path | None | Any, audio_chunks: Iterator[torch.Tensor], sample_rate: int
+    path: str | Path | None | Any, audio_chunks: Iterator[torch.Tensor], sample_rate: int, speed: float = 1.0
 ):
     """Stream audio chunks to a WAV file or stdout, optionally playing them."""
     if path == "-":
@@ -137,10 +123,18 @@ def stream_audio_chunks(
             writer = StreamingWAVWriter(f, sample_rate)
             writer.write_header(sample_rate)
 
-        for chunk in audio_chunks:
-            # Then write to file
+        if speed != 1.0:
+            import torchaudio.functional as F_audio
+            # If speed is not 1.0, we need to accumulate all chunks, resample, and then write.
+            full_audio = torch.cat(list(audio_chunks), dim=0)
+            resampled_audio = F_audio.speed(full_audio.unsqueeze(0), speed, 1000)[0]
             if path is not None:
-                writer.write_pcm_data(chunk)
+                writer.write_pcm_data(resampled_audio)
+        else:
+            for chunk in audio_chunks:
+                # Then write to file
+                if path is not None:
+                    writer.write_pcm_data(chunk)
 
         if path is not None:
             writer.finalize()

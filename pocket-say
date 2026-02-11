@@ -16,12 +16,17 @@ PROJECT_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 VOICE=""
 OUTPUT_FILE=""
 TEXT=""
+PERSONA=""
 
 # Parse arguments to mimic 'say'
 while [[ $# -gt 0 ]]; do
     case $1 in
         -v|--voice)
             VOICE="$2"
+            shift 2
+            ;;
+        --persona)
+            PERSONA="$2"
             shift 2
             ;;
         -o|--output-file)
@@ -47,10 +52,21 @@ done
 if [ -z "$VOICE" ]; then
     if [ -f "$PROJECT_DIR/.current_voice" ]; then
         VOICE=$(cat "$PROJECT_DIR/.current_voice")
-    else
+    # Don't set a default voice if a persona is active
+    elif [ ! -f "$PROJECT_DIR/.current_persona" ]; then
         VOICE="alba"
     fi
 fi
+
+# If PERSONA is not set via --persona, check .current_persona config
+if [ -z "$PERSONA" ]; then
+    if [ -f "$PROJECT_DIR/.current_persona" ]; then
+        PERSONA=$(cat "$PROJECT_DIR/.current_persona")
+    fi
+fi
+
+# DEBUG LOGGING
+echo "[$(date)] Speaking: $TEXT (Voice: $VOICE)" >> "$PROJECT_DIR/pocket_say.log"
 
 # Handle STDIN if TEXT is empty
 if [ -z "$TEXT" ]; then
@@ -84,39 +100,82 @@ if ! curl -s "http://localhost:8000/health" > /dev/null; then
     "$PROJECT_DIR/scripts/start_server.sh" > /dev/null 2>&1
 fi
 
-# Hit the local server
-curl -s -X POST "http://localhost:8000/tts" \
-     -H "Content-Type: application/x-www-form-urlencoded" \
-     --data-urlencode "text=$TEXT" \
-     --data-urlencode "voice_url=$VOICE" \
-     --output "$TEMP_WAV"
+CURL_DATA_ARGS=()
+CURL_DATA_ARGS+=(--data-urlencode "text=$TEXT")
+if [ -n "$VOICE" ]; then
+    CURL_DATA_ARGS+=(--data-urlencode "voice_url=$VOICE")
+fi
+if [ -n "$PERSONA" ]; then
+    CURL_DATA_ARGS+=(--data-urlencode "persona=$PERSONA")
+fi
 
+# Hit the local server
+echo "CURL ARGS: ${CURL_DATA_ARGS[@]}" >> "$PROJECT_DIR/pocket_say.log"
+# Hit the local server - separate status logging from file output
+HTTP_STATUS=$(curl -s -X POST "http://localhost:8000/tts" \
+     -H "Content-Type: application/x-www-form-urlencoded" \
+     "${CURL_DATA_ARGS[@]}" \
+     --output "$TEMP_WAV" \
+     -w "%{http_code}")
+
+echo "HTTP status: $HTTP_STATUS" >> "$PROJECT_DIR/pocket_say.log"
+
+
+EXIT_CODE=0
 if [ "$PLAY_AUDIO" = true ]; then
+    echo "PLAY_AUDIO is true" >> "$PROJECT_DIR/pocket_say.log"
     if [ -s "$TEMP_WAV" ]; then
+        echo "TEMP_WAV is not empty" >> "$PROJECT_DIR/pocket_say.log"
         SHOULD_PLAY=true
-        if [ -f "$PROJECT_DIR/.headphones_only" ]; then
+        
+        # Check if muted
+        if [ -f "$PROJECT_DIR/.muted" ]; then
+            echo "Muted, SHOULD_PLAY is false" >> "$PROJECT_DIR/pocket_say.log"
+            SHOULD_PLAY=false
+        fi
+
+        if [ "$SHOULD_PLAY" = true ] && [ -f "$PROJECT_DIR/.headphones_only" ]; then
+            echo "Headphones only is true" >> "$PROJECT_DIR/pocket_say.log"
             # Check if headphones are connected
             OUTPUT_INFO=$(system_profiler SPAudioDataType | grep -B 10 "Default Output Device: Yes")
+            echo "OUTPUT_INFO: $OUTPUT_INFO" >> "$PROJECT_DIR/pocket_say.log"
             
             # Default to not playing if Headphones Only is on
             SHOULD_PLAY=false
             
             # Allow if it's explicitly Headphones or Bluetooth
             if echo "$OUTPUT_INFO" | grep -Ei "Headphone|Bluetooth|AirPod|Buds|Headset" > /dev/null; then
+                echo "Headphones detected, SHOULD_PLAY is true" >> "$PROJECT_DIR/pocket_say.log"
                 SHOULD_PLAY=true
             fi
             
             # If it's Built-in but not Headphones, it's definitely speakers
             if echo "$OUTPUT_INFO" | grep -q "Transport: Built-in" && ! echo "$OUTPUT_INFO" | grep -Ei "Headphone" > /dev/null; then
+                echo "Built-in speakers detected, SHOULD_PLAY is false" >> "$PROJECT_DIR/pocket_say.log"
                 SHOULD_PLAY=false
             fi
         fi
 
         if [ "$SHOULD_PLAY" = true ]; then
-            afplay "$TEMP_WAV"
+            echo "SHOULD_PLAY is true, calling afplay" >> "$PROJECT_DIR/pocket_say.log"
+            if afplay "$TEMP_WAV"; then
+                echo "afplay successful" >> "$PROJECT_DIR/pocket_say.log"
+                rm "$TEMP_WAV"
+            else
+                echo "afplay failed. The temporary file is at: $TEMP_WAV" >> "$PROJECT_DIR/pocket_say.log"
+                cat "$TEMP_WAV" >> "$PROJECT_DIR/pocket_say.log"
+                EXIT_CODE=1
+            fi
+        else
+            echo "SHOULD_PLAY is false, not calling afplay" >> "$PROJECT_DIR/pocket_say.log"
         fi
+    else
+        echo "TEMP_WAV is empty" >> "$PROJECT_DIR/pocket_say.log"
+        EXIT_CODE=1
     fi
-    rm "$TEMP_WAV"
 else
-    echo "Audio saved to $OUTPUT_FILE"
+    echo "PLAY_AUDIO is false, saving to $OUTPUT_FILE" >> "$PROJECT_DIR/pocket_say.log"
 fi
+
+echo "Exiting with code $EXIT_CODE" >> "$PROJECT_DIR/pocket_say.log"
+exit $EXIT_CODE
