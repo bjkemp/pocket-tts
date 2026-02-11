@@ -1,6 +1,7 @@
 """Integration tests for the CLI generate command using real implementation."""
 
 import os
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -171,3 +172,88 @@ def test_generate_multiple_runs(tmp_path):
         assert audio.shape[0] == 1  # Mono channel
         assert audio.shape[1] > 0  # Has audio samples
         assert sample_rate == 24000
+
+def test_generate_with_persona(tmp_path, monkeypatch):
+    """Test generate command with a persona using a local voice."""
+    # Create a dummy voice file
+    voices_dir = tmp_path / "tts-voices"
+    voices_dir.mkdir()
+    dummy_voice_file = voices_dir / "local_test_voice.wav"
+    # Create a minimal valid WAV file header
+    dummy_voice_file.write_bytes(b'RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80\xbb\x00\x00\x00\xee\x02\x00\x04\x00\x10\x00data\x00\x00\x00\x00')
+
+    # Create persona file pointing to the local voice by name
+    personas_dir = tmp_path / "personas"
+    personas_dir.mkdir()
+    persona_file = personas_dir / "local_test.md"
+    persona_file.write_text("""
+---
+name: Local Test Persona
+voice: "local_test_voice"
+---
+""")
+
+    monkeypatch.setenv("POCKET_TTS_PERSONAS_DIR", str(personas_dir))
+    monkeypatch.setenv("POCKET_TTS_VOICES_DIR", str(voices_dir))
+
+    output_file = tmp_path / "persona_test.wav"
+    result = runner.invoke(
+        cli_app,
+        [
+            "generate",
+            "--persona",
+            "local_test",
+            "--output-path",
+            str(output_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert output_file.exists()
+
+    audio, sample_rate = audio_read(str(output_file))
+    assert audio.shape[0] == 1
+    assert audio.shape[1] > 0
+    assert sample_rate == 24000
+
+def test_list_personas_cli(tmp_path, monkeypatch):
+    """Test the list-personas CLI command."""
+    personas_dir = tmp_path / "personas"
+    personas_dir.mkdir()
+    (personas_dir / "test1.md").write_text("---\nname: T1\n---\n")
+    (personas_dir / "test2.md").write_text("---\nname: T2\n---\n")
+
+    monkeypatch.setenv("POCKET_TTS_PERSONAS_DIR", str(personas_dir))
+
+    result = runner.invoke(cli_app, ["list-personas"])
+
+    assert result.exit_code == 0
+    assert "test1" in result.stdout
+    assert "test2" in result.stdout
+
+def test_generate_with_speed(tmp_path):
+    """Test generate command with speed parameter."""
+    output_file_normal = tmp_path / "normal_speed.wav"
+    output_file_fast = tmp_path / "fast_speed.wav"
+
+    # Generate at normal speed
+    result_normal = runner.invoke(
+        cli_app,
+        ["generate", "--text", "This is a test sentence.", "--output-path", str(output_file_normal)],
+    )
+    assert result_normal.exit_code == 0
+    audio_normal, _ = audio_read(str(output_file_normal))
+
+    # Generate at faster speed
+    with patch('torchaudio.functional.speed') as mock_speed:
+        result_fast = runner.invoke(
+            cli_app,
+            ["generate", "--text", "This is a test sentence.", "--speed", "1.5", "--output-path", str(output_file_fast)],
+        )
+        assert result_fast.exit_code == 0
+        mock_speed.assert_called_once()
+
+    audio_fast, _ = audio_read(str(output_file_fast))
+
+    # The faster audio should be shorter
+    assert audio_fast.shape[1] < audio_normal.shape[1]

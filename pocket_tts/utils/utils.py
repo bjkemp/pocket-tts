@@ -66,28 +66,39 @@ class display_execution_time:
 
 
 def download_if_necessary(file_path: str) -> Path:
-    if file_path.startswith("http://") or file_path.startswith("https://"):
-        cache_dir = make_cache_directory()
-        cached_file = cache_dir / (
-            hashlib.sha256(file_path.encode()).hexdigest() + "." + file_path.split(".")[-1]
-        )
-        if not cached_file.exists():
-            response = requests.get(file_path)
-            response.raise_for_status()
-            with open(cached_file, "wb") as f:
-                f.write(response.content)
-        return cached_file
-    elif file_path.startswith("hf://"):
-        file_path = file_path.removeprefix("hf://")
-        splitted = file_path.split("/")
-        repo_id = "/".join(splitted[:2])
-        filename = "/".join(splitted[2:])
-        if "@" in filename:
-            filename, revision = filename.split("@")
-        else:
-            revision = None
-        cached_file = hf_hub_download(repo_id=repo_id, filename=filename, revision=revision)
-        return Path(cached_file)
+    if file_path.startswith("http://") or file_path.startswith("https://") or file_path.startswith("hf://"):
+        local_path = None
+        if file_path.startswith("hf://"):
+            # hf://repo/path/to/file@revision
+            repo_and_path = file_path.removeprefix("hf://")
+            
+            path_parts = repo_and_path.split('/')
+            # repo is parts[0]/parts[1]
+            # file_path_in_repo is parts[2:]
+            if len(path_parts) > 2:
+                file_path_in_repo = "/".join(path_parts[2:])
+                if '@' in file_path_in_repo:
+                    file_path_in_repo = file_path_in_repo.split('@')[0]
+
+                project_root = Path(__file__).parent.parent.parent
+                # Look for the file with its subdirectory structure inside tts-voices
+                local_path = project_root / "tts-voices" / file_path_in_repo
+            else: # top-level file in repo (e.g. tokenizer.model)
+                filename = path_parts[-1]
+                if '@' in filename:
+                    filename = filename.split('@')[0]
+                project_root = Path(__file__).parent.parent.parent
+                local_path = project_root / "tts-voices" / filename
+        else: # http/https
+            filename = Path(file_path).name
+            project_root = Path(__file__).parent.parent.parent
+            local_path = project_root / "tts-voices" / filename
+
+        if local_path and local_path.exists():
+            logging.info(f"Found local file for {file_path}: {local_path}")
+            return local_path
+        
+        raise FileNotFoundError(f"Could not find local file at '{local_path}'. Please make sure all model files are present in the tts-voices directory, maintaining the subdirectory structure from the original repository (e.g., 'embeddings/azelma.safetensors').")
     else:
         return Path(file_path)
 

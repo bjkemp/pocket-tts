@@ -42,6 +42,9 @@ while [[ $# -gt 0 ]]; do
             if [[ "$2" == voice_url=* ]]; then
                 echo "VOICE: ${2#voice_url=}" >> "$TEST_LOG"
             fi
+            if [[ "$2" == persona=* ]]; then
+                echo "PERSONA: ${2#persona=}" >> "$TEST_LOG"
+            fi
             shift 2
             ;;
         *)
@@ -90,6 +93,14 @@ def test_pocket_say_basic_play(test_env):
 
     log_content = test_env["test_log"].read_text()
     assert "PLAYING" in log_content
+
+
+def test_pocket_say_with_persona(test_env):
+    """Test that pocket-say passes the persona to curl."""
+    subprocess.run([test_env["pocket_say"], "--persona", "test_persona", "hello"], env=test_env["env"], check=True)
+
+    log_content = test_env["test_log"].read_text()
+    assert "PERSONA: test_persona" in log_content
 
 
 def test_pocket_say_headphones_only_enabled_with_headphones(test_env):
@@ -181,3 +192,15 @@ def test_pocket_say_via_symlink(test_env):
     log_content = test_env["test_log"].read_text()
     # If symlink resolution fails, it will use the default 'alba' because it won't find .current_voice
     assert "VOICE: azelma" in log_content
+
+
+def test_pocket_say_muted(test_env):
+    """Test that pocket-say DOES NOT play audio if .muted file exists."""
+    # Create .muted file
+    (test_env["tmp_path"] / ".muted").write_text("1")
+
+    subprocess.run([test_env["pocket_say"], "hello"], env=test_env["env"], check=True)
+
+    if test_env["test_log"].exists():
+        log_content = test_env["test_log"].read_text()
+        assert "PLAYING" not in log_content

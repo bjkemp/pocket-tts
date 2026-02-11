@@ -22,16 +22,12 @@
     if (self) {
         // Try to find project path dynamically
         NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-        // If we are running from build/PocketTTSBar.app, project root is 3 levels up
-        // PocketMenuBar/build/PocketTTSBar.app -> 1: build, 2: PocketMenuBar, 3: root
         NSString *path = [bundlePath stringByDeletingLastPathComponent]; // build/
         path = [path stringByDeletingLastPathComponent]; // PocketMenuBar/
         path = [path stringByDeletingLastPathComponent]; // root
         
-        // Verify if it looks like the project root (e.g. has pocket-say)
         NSString *checkPath = [path stringByAppendingPathComponent:@"pocket-say"];
         if (![[NSFileManager defaultManager] fileExistsAtPath:checkPath]) {
-            // Fallback to hardcoded for now if dynamic fails, but try to be smart
             path = @"/Users/kempb/Projects/pocket-tts";
         }
         
@@ -39,71 +35,106 @@
         _currentVoice = @"azelma";
         _currentPersona = @"narrator";
         
-        [self loadDynamicVoices];
-        [self loadDynamicPersonas];
+        // Load settings and error state immediately
         [self loadSettings];
-        [self checkError]; // Check for error status on startup
+        [self checkError];
+        
+        // Initialize placeholders so the menu works immediately
+        _voices = @[@"alba", @"marius", @"javert", @"jean", @"fantine", @"cosette", @"eponine", @"azelma"];
+        _personas = @[@"narrator"];
     }
     return self;
 }
 
 - (void)loadDynamicVoices {
-    NSString *scriptPath = [self.projectPath stringByAppendingPathComponent:@"scripts/list_all_voices.sh"];
-    NSTask *task = [[NSTask alloc] init];
-    [task setLaunchPath:@"/bin/bash"];
-    [task setArguments:@[scriptPath]];
-    
-    NSPipe *pipe = [NSPipe pipe];
-    [task setStandardOutput:pipe];
-    
-    NSError *error = nil;
-    if (@available(macOS 10.13, *)) {
-        [task launchAndReturnError:&error];
-    } else {
-        [task launch];
-    }
-    
-    NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
-    [task waitUntilExit];
-    
-    NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    NSArray *lines = [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    
-    NSMutableArray *validVoices = [NSMutableArray array];
-    for (NSString *line in lines) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmed.length > 0) {
-            [validVoices addObject:trimmed];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString *scriptPath = [self.projectPath stringByAppendingPathComponent:@"scripts/list_all_voices.sh"];
+        NSTask *task = [[NSTask alloc] init];
+        [task setLaunchPath:@"/bin/bash"];
+        [task setArguments:@[scriptPath]];
+        
+        NSPipe *pipe = [NSPipe pipe];
+        [task setStandardOutput:pipe];
+        
+        NSError *taskError = nil;
+        if (@available(macOS 10.13, *)) {
+            [task launchAndReturnError:&taskError];
+        } else {
+            [task launch];
         }
-    }
-    self.voices = [validVoices sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+        
+        NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
+        [task waitUntilExit];
+        
+        NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        NSArray *lines = [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+        
+        NSMutableArray *validVoices = [NSMutableArray array];
+        for (NSString *line in lines) {
+            NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (trimmed.length > 0) {
+                [validVoices addObject:trimmed];
+            }
+        }
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSArray *defaultVoiceNames = @[@"alba", @"marius", @"javert", @"jean", @"fantine", @"cosette", @"eponine", @"azelma"];
+            NSMutableArray *others = [NSMutableArray array];
+            NSMutableArray *defaultsFound = [NSMutableArray array];
+            
+            for (NSString *voice in validVoices) {
+                if ([defaultVoiceNames containsObject:voice.lowercaseString]) {
+                    [defaultsFound addObject:voice];
+                } else {
+                    [others addObject:voice];
+                }
+            }
+            
+            // Sort both lists
+            [defaultsFound sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+            [others sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+            
+            // Combine: defaults first, then others
+            NSMutableArray *finalList = [NSMutableArray arrayWithArray:defaultsFound];
+            [finalList addObjectsFromArray:others];
+            
+            self.voices = finalList;
+            [self setupMenu];
+        });
+    });
 }
 
 - (void)loadDynamicPersonas {
-    NSString *personasPath = [self.projectPath stringByAppendingPathComponent:@"personas"];
-    NSError *error = nil;
-    NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:personasPath error:&error];
-    
-    NSMutableArray *validPersonas = [NSMutableArray array];
-    for (NSString *file in files) {
-        if ([file hasSuffix:@".md"]) {
-            [validPersonas addObject:[file stringByDeletingPathExtension]];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString *personasPath = [self.projectPath stringByAppendingPathComponent:@"personas"];
+        NSError *error = nil;
+        NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:personasPath error:&error];
+        
+        NSMutableArray *validPersonas = [NSMutableArray array];
+        for (NSString *file in files) {
+            if ([file hasSuffix:@".md"]) {
+                [validPersonas addObject:[file stringByDeletingPathExtension]];
+            }
         }
-    }
-    self.personas = [validPersonas sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.personas = [validPersonas sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+            [self setupMenu];
+        });
+    });
 }
 
 - (void)refreshLists {
     [self loadDynamicVoices];
     [self loadDynamicPersonas];
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self setupMenu];
-        [self updateIcon];
-    });
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
+    [self updateIcon];
+    [self setupMenu];
+    
+    // Start background loading
     [self refreshLists];
     [self checkStatus];
     
@@ -114,6 +145,7 @@
                                                 userInfo:nil 
                                                  repeats:YES];
 }
+
 
 
 - (void)loadSettings {

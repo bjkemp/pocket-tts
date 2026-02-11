@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=2",
     # I tried 2.4.0 but the generated audio is wrong, so 2.5+ is needed.
     "torch>=2.5.0",
+    "torchaudio>=2.5.0",
     "pydantic>=2",
     "sentencepiece>=0.2.1",
     "beartype>=0.22.5",

@@ -35,24 +35,54 @@ else
     echo "Test Voice | color=gray"
 fi
 
+MUTE_CHECK=""
+if [ -f ".muted" ]; then MUTE_CHECK="✅ "; fi
+echo "$MUTE_CHECK""Mute | bash=$PROJECT_DIR/PocketMenuBar/control.sh param1=mute terminal=false"
+
 HP_CHECK=""
 if [ -f ".headphones_only" ]; then HP_CHECK="✅ "; fi
 echo "$HP_CHECK""Headphones Only | bash=$PROJECT_DIR/PocketMenuBar/control.sh param1=headphones terminal=false"
 
 echo "---"
-echo "Active Voice"
+echo "Default Voice"
 
 CURRENT_VOICE="alba"
 if [ -f ".current_voice" ]; then
     CURRENT_VOICE=$(cat .current_voice)
 fi
 
-VOICES=("alba" "marius" "javert" "jean" "fantine" "cosette" "eponine" "azelma")
+# Dynamically populate voices from tts-voices directory
+VOICES=()
+VOICE_DIRS=$(find "$PROJECT_DIR/tts-voices" -mindepth 1 -maxdepth 1 -type d -not -name ".git")
+for dir in $VOICE_DIRS; do
+    VOICES+=("$(basename "$dir")")
+done
 
 for v in "${VOICES[@]}"; do
     CHECK=""
     if [ "$v" == "$CURRENT_VOICE" ]; then CHECK="✅ "; fi
     echo "$CHECK$v | bash=$PROJECT_DIR/PocketMenuBar/control.sh param1=voice param2=$v terminal=false"
+done
+
+echo "---"
+echo "Default Persona"
+
+CURRENT_PERSONA="narrator"
+if [ -f ".current_persona" ]; then
+    CURRENT_PERSONA=$(cat .current_persona)
+fi
+
+# Dynamically populate personas from personas directory
+PERSONAS=()
+PERSONA_FILES=$(find "$PROJECT_DIR/personas" -name "*.md")
+for file in $PERSONA_FILES; do
+    PERSONAS+=("$(basename "$file" .md)")
+done
+
+for p in "${PERSONAS[@]}"; do
+    CHECK=""
+    if [ "$p" == "$CURRENT_PERSONA" ]; then CHECK="✅ "; fi
+    echo "$CHECK$p | bash=$PROJECT_DIR/PocketMenuBar/control.sh param1=persona param2=$p terminal=false"
 done
 
 echo "---"
